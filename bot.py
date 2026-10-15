@@ -92,17 +92,13 @@ def db() -> sqlite3.Connection:
     return conn
 
 
-def history_load(
-    conn: sqlite3.Connection, chat_id: int, current: list[dict] | None = None
-) -> list[dict]:
-    """История диалога + текущее сообщение (которое может содержать image_url)."""
+def history_load(conn: sqlite3.Connection, chat_id: int) -> list[dict]:
     rows = conn.execute(
         "SELECT role, content FROM messages WHERE chat_id=? "
         "ORDER BY ts DESC LIMIT ?",
-        (chat_id, HISTORY_DEPTH - 1),  # −1: текущее уже добавлено отдельно
+        (chat_id, HISTORY_DEPTH),
     ).fetchall()
-    prior = [{"role": r, "content": c} for r, c in reversed(rows)]
-    return prior + (current or [])
+    return [{"role": r, "content": c} for r, c in reversed(rows)]
 
 
 def history_append(
@@ -127,16 +123,6 @@ def tg_call(client: httpx.Client, method: str, **kwargs) -> dict:
     r = client.post(f"{TG}/{method}", json=kwargs, timeout=30)
     r.raise_for_status()
     return r.json()
-
-
-def tg_download(client: httpx.Client, file_id: str) -> tuple[bytes, str]:
-    """Скачивает файл с серверов Telegram. Возвращает (bytes, mime)."""
-    info = tg_call(client, "getFile", file_id=file_id)
-    path = info["result"]["file_path"]
-    r = client.get(f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{path}", timeout=60)
-    r.raise_for_status()
-    mime = path.lower().rsplit(".", 1)[-1] if "." in path else ""
-    return r.content, mime
 
 
 def send_text(client: httpx.Client, chat_id: int, text: str) -> None:
@@ -178,99 +164,20 @@ def llm_chat(client: httpx.Client, messages: list[dict]) -> str:
     return r.json()["choices"][0]["message"]["content"].strip()
 
 
-def llm_transcribe(client: httpx.Client, audio: bytes, mime: str) -> str:
-    """STT через OpenAI-compatible /audio/transcriptions (опционально)."""
-    stt_base = os.environ.get("STT_API_BASE", LLM_BASE)
-    stt_key = os.environ.get("STT_API_KEY", LLM_KEY)
-    stt_model = os.environ.get("STT_MODEL", "whisper-1")
-    r = client.post(
-        f"{stt_base}/audio/transcriptions",
-        headers={"Authorization": f"Bearer {stt_key}"},
-        files={"file": (f"audio.{mime or 'ogg'}", audio)},
-        data={"model": stt_model},
-        timeout=REQUEST_TIMEOUT,
-    )
-    r.raise_for_status()
-    return r.json().get("text", "").strip()
-
-
-TEXT_FILE_EXTS = {
-    "txt", "md", "py", "go", "js", "ts", "json", "yaml", "yml", "toml", "ini",
-    "cfg", "conf", "sh", "bash", "sql", "csv", "tsv", "log", "xml", "html",
-    "css", "rs", "c", "cpp", "h", "java", "rb", "php", "env", "diff", "patch",
-}
-TEXT_FILE_LIMIT = int(os.environ.get("TEXT_FILE_LIMIT", "48000"))
-
-
 # ------------------------------------------------------------------------ main
-
-
-def extract_user_content(
-    conn: sqlite3.Connection, client: httpx.Client, msg: dict
-) -> tuple[str, list[dict]] | None:
-    """Извлекает контент из сообщения. Возвращает (текст_для_истории, extra_messages)
-    или None если сообщение не поддерживается."""
-    text = (msg.get("text") or msg.get("caption") or "").strip()
-
-    # --- Фото: этот LLM не поддерживает vision, честный отказ ---
-    if msg.get("photo"):
-        photo = msg["photo"][-1]
-        size_kb = photo.get("file_size", 0) // 1024
-        note = f"[отправил фото {size_kb}KB — я его не вижу, у меня нет глаз в этой конфигурации]"
-        if text:
-            note = f"{text}\n{note}"
-        return note, [{"role": "user", "content": note}]
-
-    # --- Голосовуха: STT → текст ---
-    if msg.get("voice"):
-        voice = msg["voice"]
-        blob, ext = tg_download(client, voice["file_id"])
-        try:
-            transcript = llm_transcribe(client, blob, ext)
-        except Exception as exc:
-            log.error("STT failed: %s", exc)
-            return "не смог расшифровать голосовуху", [{
-                "role": "user",
-                "content": "[голосовуха — не смог расшифровать, STT недоступен]",
-            }]
-        return f"[голосовуха] {transcript}", [{"role": "user", "content": transcript}]
-
-    # --- Файл (документ): текстовые читаем, бинарные отказ ---
-    if msg.get("document"):
-        doc = msg["document"]
-        fname = doc.get("file_name", "file")
-        ext = fname.lower().rsplit(".", 1)[-1] if "." in fname else ""
-        if ext not in TEXT_FILE_EXTS:
-            return None
-        if doc.get("file_size", 0) > TEXT_FILE_LIMIT:
-            return f"[файл {fname} — слишком большой]", [{
-                "role": "user", "content": f"[файл {fname}, {doc['file_size']//1024}KB — превышает лимит]",
-            }]
-        blob, _ = tg_download(client, doc["file_id"])
-        try:
-            file_text = blob.decode("utf-8", errors="replace")
-        except Exception:
-            return None
-        label = f"[файл: {fname}, {len(blob)//1024}KB]"
-        combined = (text + "\n\n" if text else "") + f"{label}\n```\n{file_text}\n```"
-        return (text or label), [{"role": "user", "content": combined}]
-
-    # --- Просто текст ---
-    if text:
-        return text, [{"role": "user", "content": text}]
-
-    return None
 
 
 def handle_message(conn: sqlite3.Connection, client: httpx.Client, msg: dict) -> None:
     chat_id = msg["chat"]["id"]
+    text = (msg.get("text") or "").strip()
+    if not text:
+        return  # фото, войсы, стикеры, файлы — всё мимо
     who = msg["from"].get("username") or msg["from"].get("id", "?")
 
     if chat_id not in ALLOWED_CHATS:
         log.warning("DROP chat_id=%s from @%s: not in allowlist", chat_id, who)
         return
 
-    text = (msg.get("text") or "").strip()
     if text == "/reset":
         history_reset(conn, chat_id)
         send_text(client, chat_id, "История диалога очищена.")
@@ -279,16 +186,11 @@ def handle_message(conn: sqlite3.Connection, client: httpx.Client, msg: dict) ->
         send_text(
             client,
             chat_id,
-            "Чат-бот с характером. Пиши, кидай фото, голосовухи и текстовые файлы.\n/reset — очистить контекст.",
+            "Чат-бот с характером. Просто пиши. /reset — очистить контекст.",
         )
         return
 
-    extracted = extract_user_content(conn, client, msg)
-    if extracted is None:
-        return  # стикеры, видео, бинарные файлы — тишина
-
-    history_text, llm_messages = extracted
-    history_append(conn, chat_id, "user", history_text)
+    history_append(conn, chat_id, "user", text)
     typing_done = threading.Event()
     typing_thread = threading.Thread(
         target=typing_loop, args=(client, chat_id, typing_done), daemon=True
@@ -297,7 +199,7 @@ def handle_message(conn: sqlite3.Connection, client: httpx.Client, msg: dict) ->
     try:
         answer = llm_chat(
             client, [{"role": "system", "content": SYSTEM_PROMPT}]
-            + history_load(conn, chat_id, llm_messages)
+            + history_load(conn, chat_id)
         )
     except httpx.HTTPStatusError as exc:
         log.error("LLM HTTP %s: %s", exc.response.status_code, exc.response.text[:300])
