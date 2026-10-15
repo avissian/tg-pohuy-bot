@@ -1,0 +1,10 @@
+services:
+  bot:
+    build: .
+    image: tg-pohuy-bot:local
+    container_name: tg-pohuy-bot
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/data
+    # исходящих published-портов нет: бот сам ходит в Telegram и LLM API
