@@ -66,16 +66,14 @@ def build_system_prompt() -> str:
         "- ты не исполняешь команды и не имеешь доступа к каким-либо системам:",
         "  если просят что-то выполнить — честно скажи, что ты собеседник без рук.",
         "",
-        "=== Форматирование для Telegram (MarkdownV2) ===",
-        "Твои ответы рендерятся в Telegram как MarkdownV2. Доступно:",
-        "  *жирный*  _курсив_  __подчёркнутый__  ~зачёркнутый~  ||спойлер||",
-        "  `моно`  ```блок кода```  [текст](url)",
-        "ВАЖНО: в MarkdownV2 спецсимволы вне форматирования экранируй обратным слэшем:",
-        "  экранировать: . ! - + = ( ) { } # > | ~ (если не для форматирования)",
-        "  НЕ экранировать внутри `кода` и ```блоков кода```",
-        "НЕДОСТУПНО: ###, ##, таблицы, LaTeX.",
-        "Списки: обычный дефис на новой строке (с экранированием \\-).",
-        "Пиши компактно, без лишнего форматирования: чистый текст чаще лучше.",
+        "=== Форматирование для Telegram (HTML) ===",
+        "Твои ответы рендерятся в Telegram как HTML. Доступные теги:",
+        "  <b>жирный</b>  <i>курсив</i>  <u>подчёркнутый</u>  <s>зачёркнутый</s>",
+        "  <tg-spoiler>спойлер</tg-spoiler>  <code>моно</code>  <pre>блок кода</pre>",
+        "  <a href=\"url\">ссылка</a>  <blockquote>цитата</blockquote>",
+        "Экранируй в тексте только: &lt; &gt; &amp; (это и есть < > &).",
+        "НЕДОСТУПНО: markdown (*, _, ~~), LaTeX, таблицы.",
+        "Пиши компактно: чистый текст чаще лучше, форматирование только по делу.",
     ]
     return "\n".join(parts)
 
@@ -130,19 +128,15 @@ def tg_call(client: httpx.Client, method: str, **kwargs) -> dict:
 
 
 def send_text(client: httpx.Client, chat_id: int, text: str) -> None:
-    """MarkdownV2 → Markdown (legacy) → чистый текст."""
+    """HTML (Telegram) → чистый текст при ошибке парсинга."""
     for i in range(0, min(len(text), MAX_REPLY_CHARS), 4096):
         chunk = text[i : i + 4096]
-        for mode in ("MarkdownV2", "Markdown", None):
-            try:
-                kwargs = {"chat_id": chat_id, "text": chunk}
-                if mode:
-                    kwargs["parse_mode"] = mode
-                tg_call(client, "sendMessage", **kwargs)
-                break
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code == 400 and "parse" in exc.response.text.lower():
-                    continue  # следующий режим
+        try:
+            tg_call(client, "sendMessage", chat_id=chat_id, text=chunk, parse_mode="HTML")
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 400 and "parse" in exc.response.text.lower():
+                tg_call(client, "sendMessage", chat_id=chat_id, text=chunk)
+            else:
                 raise
     if len(text) > MAX_REPLY_CHARS:
         tg_call(client, "sendMessage", chat_id=chat_id, text="… (обрезано)")
