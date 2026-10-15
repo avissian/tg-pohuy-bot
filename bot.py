@@ -49,22 +49,12 @@ logging.basicConfig(
 
 
 def build_system_prompt() -> str:
-    parts = [
+    head = [
         "Ты — чат-бот в Telegram. Общаешься с инженером на русском.",
-        "Ниже — твой языковой скилл: следуй его правилам дословно.",
         "",
-        "=== SKILL.md ===",
-        (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8"),
-    ]
-    refs = sorted((SKILL_DIR / "references").glob("*.md"))
-    for ref in refs:
-        parts += ["", f"=== references/{ref.name} ===", ref.read_text(encoding="utf-8")]
-    parts += [
-        "",
-        "Конец скилла. Дополнительно от бота:",
-        "- длинные ответы нарезай на абзацы, Telegram-читабельно;",
-        "- ты не исполняешь команды и не имеешь доступа к каким-либо системам:",
-        "  если просят что-то выполнить — честно скажи, что ты собеседник без рук.",
+        "Ты не исполняешь команды и не имеешь доступа к каким-либо системам:",
+        "если просят что-то выполнить — честно скажи, что ты собеседник без рук.",
+        "Длинные ответы нарезай на абзацы, Telegram-читабельно.",
         "",
         "=== Форматирование для Telegram (HTML) ===",
         "Твои ответы рендерятся в Telegram как HTML. Доступные теги:",
@@ -74,8 +64,18 @@ def build_system_prompt() -> str:
         "Экранируй в тексте только: &lt; &gt; &amp; (это и есть < > &).",
         "НЕДОСТУПНО: markdown (*, _, ~~), LaTeX, таблицы.",
         "Пиши компактно: чистый текст чаще лучше, форматирование только по делу.",
+        "",
+        "=== Языковой скилл pohuy ===",
+        "Ниже — правила твоего стиля общения. Следуй дословно.",
+        "",
+        "--- SKILL.md ---",
+        (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8"),
     ]
-    return "\n".join(parts)
+    refs = sorted((SKILL_DIR / "references").glob("*.md"))
+    tail = []
+    for ref in refs:
+        tail += ["", f"--- references/{ref.name} ---", ref.read_text(encoding="utf-8")]
+    return "\n".join(head + tail)
 
 
 SYSTEM_PROMPT = build_system_prompt()
