@@ -21,6 +21,7 @@ import sys
 import time
 
 import httpx
+import threading
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 ALLOWED_CHATS = {
@@ -126,6 +127,16 @@ def send_text(client: httpx.Client, chat_id: int, text: str) -> None:
         tg_call(client, "sendMessage", chat_id=chat_id, text="… (обрезано)")
 
 
+def typing_loop(client: httpx.Client, chat_id: int, done: threading.Event) -> None:
+    """Держит индикатор «печатает…» пока LLM думает (Telegram гасит его за ~5с)."""
+    while not done.is_set():
+        try:
+            tg_call(client, "sendChatAction", chat_id=chat_id, action="typing")
+        except Exception:  # noqa: BLE001 — индикатор не критичен
+            pass
+        done.wait(4)
+
+
 # -------------------------------------------------------------------------- llm
 
 
@@ -167,6 +178,11 @@ def handle_message(conn: sqlite3.Connection, client: httpx.Client, msg: dict) ->
         return
 
     history_append(conn, chat_id, "user", text)
+    typing_done = threading.Event()
+    typing_thread = threading.Thread(
+        target=typing_loop, args=(client, chat_id, typing_done), daemon=True
+    )
+    typing_thread.start()
     try:
         answer = llm_chat(
             client, [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -180,6 +196,8 @@ def handle_message(conn: sqlite3.Connection, client: httpx.Client, msg: dict) ->
         log.error("LLM network error: %s", exc)
         send_text(client, chat_id, "Не дозвонился до LLM API. Попробуй ещё раз.")
         return
+    finally:
+        typing_done.set()
 
     history_append(conn, chat_id, "assistant", answer)
     send_text(client, chat_id, answer)
