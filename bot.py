@@ -65,6 +65,13 @@ def build_system_prompt() -> str:
         "- длинные ответы нарезай на абзацы, Telegram-читабельно;",
         "- ты не исполняешь команды и не имеешь доступа к каким-либо системам:",
         "  если просят что-то выполнить — честно скажи, что ты собеседник без рук.",
+        "",
+        "=== Форматирование для Telegram ===",
+        "Твои ответы рендерятся в Telegram как Markdown. Доступно:",
+        "  *жирный*  _курсив_  `моно`  ```блок кода```  ||спойлер||  [текст](url)",
+        "НЕДОСТУПНО (не используй): ###, ##, таблицы, LaTeX, ~~зачёркнутый~~.",
+        "Списки: обычный дефис на новой строке. Тире — просто дефис.",
+        "Пиши компактно, без лишнего форматирования: чистый текст чаще лучше.",
     ]
     return "\n".join(parts)
 
@@ -133,10 +140,16 @@ def tg_download(client: httpx.Client, file_id: str) -> tuple[bytes, str]:
 
 
 def send_text(client: httpx.Client, chat_id: int, text: str) -> None:
-    """Отправка с нарезкой по лимиту и parse_mode=HTML выключен (текст как есть)."""
+    """Markdown → Telegram, с fallback на чистый текст при ошибке парсинга."""
     for i in range(0, min(len(text), MAX_REPLY_CHARS), 4096):
         chunk = text[i : i + 4096]
-        tg_call(client, "sendMessage", chat_id=chat_id, text=chunk)
+        try:
+            tg_call(client, "sendMessage", chat_id=chat_id, text=chunk, parse_mode="Markdown")
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 400 and "parse" in exc.response.text.lower():
+                tg_call(client, "sendMessage", chat_id=chat_id, text=chunk)
+            else:
+                raise
     if len(text) > MAX_REPLY_CHARS:
         tg_call(client, "sendMessage", chat_id=chat_id, text="… (обрезано)")
 
@@ -199,21 +212,14 @@ def extract_user_content(
     или None если сообщение не поддерживается."""
     text = (msg.get("text") or msg.get("caption") or "").strip()
 
-    # --- Фото: vision через image_url ---
+    # --- Фото: этот LLM не поддерживает vision, честный отказ ---
     if msg.get("photo"):
-        photo = msg["photo"][-1]  # крупнейший размер
-        blob, ext = tg_download(client, photo["file_id"])
-        mime_map = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "webp": "webp", "gif": "gif"}
-        mime = mime_map.get(ext, "jpeg")
-        import base64
-        b64 = base64.b64encode(blob).decode()
-        label = f"[фото {len(blob)//1024}KB]"
-        content_parts = []
+        photo = msg["photo"][-1]
+        size_kb = photo.get("file_size", 0) // 1024
+        note = f"[отправил фото {size_kb}KB — я его не вижу, у меня нет глаз в этой конфигурации]"
         if text:
-            content_parts.append({"type": "text", "text": text})
-        content_parts.append({"type": "text", "text": f"Пользователь отправил {label}. Опиши и прокомментируй."})
-        content_parts.append({"type": "image_url", "image_url": {"url": f"data:image/{mime};base64,{b64}"}})
-        return text or label, [{"role": "user", "content": content_parts}]
+            note = f"{text}\n{note}"
+        return note, [{"role": "user", "content": note}]
 
     # --- Голосовуха: STT → текст ---
     if msg.get("voice"):
