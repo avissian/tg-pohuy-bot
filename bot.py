@@ -31,6 +31,7 @@ LLM_BASE = os.environ["LLM_API_BASE"].rstrip("/")
 LLM_KEY = os.environ["LLM_API_KEY"]
 LLM_MODEL = os.environ.get("LLM_MODEL", "gpt-4o-mini")
 HISTORY_DEPTH = int(os.environ.get("HISTORY_DEPTH", "16"))
+DEPTH_MAX = int(os.environ.get("DEPTH_MAX", "200"))
 MAX_REPLY_CHARS = int(os.environ.get("MAX_REPLY_CHARS", "3800"))
 REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "120"))
 DATA_DIR = pathlib.Path(os.environ.get("DATA_DIR", "/data"))
@@ -97,14 +98,26 @@ def db() -> sqlite3.Connection:
         " chat_id INTEGER NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL,"
         " ts REAL NOT NULL)"
     )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS settings ("
+        " chat_id INTEGER PRIMARY KEY, depth INTEGER NOT NULL)"
+    )
     return conn
+
+
+def depth_get(conn: sqlite3.Connection, chat_id: int) -> int:
+    """Глубина истории чата: своя, или HISTORY_DEPTH по умолчанию."""
+    row = conn.execute(
+        "SELECT depth FROM settings WHERE chat_id=?", (chat_id,)
+    ).fetchone()
+    return row[0] if row else HISTORY_DEPTH
 
 
 def history_load(conn: sqlite3.Connection, chat_id: int) -> list[dict]:
     rows = conn.execute(
         "SELECT role, content FROM messages WHERE chat_id=? "
         "ORDER BY ts DESC LIMIT ?",
-        (chat_id, HISTORY_DEPTH),
+        (chat_id, depth_get(conn, chat_id)),
     ).fetchall()
     return [{"role": r, "content": c} for r, c in reversed(rows)]
 
@@ -190,11 +203,31 @@ def handle_message(conn: sqlite3.Connection, client: httpx.Client, msg: dict) ->
         history_reset(conn, chat_id)
         send_text(client, chat_id, "История диалога очищена.")
         return
+    cmd = text.split()[0].split("@")[0]
+    if cmd == "/depth":
+        args = text.split()[1:]
+        if args and args[0].isdigit() and 1 <= int(args[0]) <= DEPTH_MAX:
+            conn.execute(
+                "INSERT INTO settings (chat_id, depth) VALUES (?,?) "
+                "ON CONFLICT(chat_id) DO UPDATE SET depth=excluded.depth",
+                (chat_id, int(args[0])),
+            )
+            conn.commit()
+            send_text(client, chat_id, f"Глубина истории: {args[0]} сообщений.")
+        else:
+            send_text(
+                client,
+                chat_id,
+                f"Текущая глубина: {depth_get(conn, chat_id)} сообщений. "
+                f"Команда: /depth N (1–{DEPTH_MAX}).",
+            )
+        return
     if text in ("/start", "/help"):
         send_text(
             client,
             chat_id,
-            "Чат-бот с характером. Просто пиши. /reset — очистить контекст.",
+            "Чат-бот с характером. Просто пиши. /reset — очистить контекст, "
+            "/depth N — глубина истории.",
         )
         return
 
