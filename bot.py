@@ -185,6 +185,27 @@ def llm_chat(client: httpx.Client, messages: list[dict]) -> str:
     return r.json()["choices"][0]["message"]["content"].strip()
 
 
+def llm_error_detail(response: httpx.Response) -> str:
+    """message из JSON-тела ошибки API.
+
+    Пустая строка, если тело не JSON / пустое / без message —
+    тогда пользователь видит только код ошибки.
+    """
+    try:
+        data = response.json()
+    except ValueError:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    err = data.get("error")
+    msg = err.get("message") if isinstance(err, dict) else None
+    if not isinstance(msg, str):
+        msg = data.get("message")  # некоторые API кладут message на верхний уровень
+    if not isinstance(msg, str):
+        return ""
+    return msg.strip()[:300]
+
+
 # ------------------------------------------------------------------------ main
 
 
@@ -243,8 +264,12 @@ def handle_message(conn: sqlite3.Connection, client: httpx.Client, msg: dict) ->
             + history_load(conn, chat_id)
         )
     except httpx.HTTPStatusError as exc:
+        detail = llm_error_detail(exc.response)
         log.error("LLM HTTP %s: %s", exc.response.status_code, exc.response.text[:300])
-        send_text(client, chat_id, f"LLM API вернул ошибку {exc.response.status_code}.")
+        user_text = f"LLM API вернул ошибку {exc.response.status_code}."
+        if detail:
+            user_text += f"\n{html.escape(detail)}"
+        send_text(client, chat_id, user_text)
         return
     except httpx.HTTPError as exc:
         log.error("LLM network error: %s", exc)
