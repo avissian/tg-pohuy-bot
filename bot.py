@@ -33,7 +33,7 @@ LLM_MODEL = os.environ.get("LLM_MODEL", "gpt-4o-mini")
 HISTORY_DEPTH = int(os.environ.get("HISTORY_DEPTH", "16"))
 DEPTH_MAX = int(os.environ.get("DEPTH_MAX", "200"))
 MAX_REPLY_CHARS = int(os.environ.get("MAX_REPLY_CHARS", "3800"))
-REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "120"))
+REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "600"))
 DATA_DIR = pathlib.Path(os.environ.get("DATA_DIR", "/data"))
 
 TG = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
@@ -179,7 +179,7 @@ def llm_chat(client: httpx.Client, messages: list[dict]) -> str:
         f"{LLM_BASE}/chat/completions",
         headers={"Authorization": f"Bearer {LLM_KEY}"},
         json={"model": LLM_MODEL, "messages": messages, "temperature": 0.7},
-        timeout=REQUEST_TIMEOUT,
+        timeout=httpx.Timeout(30, connect=10, read=REQUEST_TIMEOUT),
     )
     r.raise_for_status()
     return r.json()["choices"][0]["message"]["content"].strip()
@@ -258,6 +258,7 @@ def handle_message(conn: sqlite3.Connection, client: httpx.Client, msg: dict) ->
         target=typing_loop, args=(client, chat_id, typing_done), daemon=True
     )
     typing_thread.start()
+    llm_started = time.monotonic()
     try:
         answer = llm_chat(
             client, [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -270,6 +271,16 @@ def handle_message(conn: sqlite3.Connection, client: httpx.Client, msg: dict) ->
         if detail:
             user_text += f"\n{html.escape(detail)}"
         send_text(client, chat_id, user_text)
+        return
+    except httpx.TimeoutException as exc:
+        log.error(
+            "LLM timeout after %.1fs (%s; read_timeout=%ss): %s",
+            time.monotonic() - llm_started,
+            type(exc).__name__,
+            REQUEST_TIMEOUT,
+            exc,
+        )
+        send_text(client, chat_id, "LLM API не ответил вовремя. Попробуй ещё раз.")
         return
     except httpx.HTTPError as exc:
         log.error("LLM network error: %s", exc)
@@ -285,10 +296,11 @@ def handle_message(conn: sqlite3.Connection, client: httpx.Client, msg: dict) ->
 
 def main() -> None:
     log.info(
-        "bot starting: model=%s, allowlist=%s, history=%d",
+        "bot starting: model=%s, allowlist=%s, history=%d, llm_read_timeout=%ss",
         LLM_MODEL,
         sorted(ALLOWED_CHATS),
         HISTORY_DEPTH,
+        REQUEST_TIMEOUT,
     )
     conn = db()
     client = httpx.Client()
